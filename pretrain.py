@@ -17,12 +17,15 @@ import coolname
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
+from adam_atan2_pytorch import AdamAtan2
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 from models.ema import EMAHelper
+
+from models.tutor.llm_tutor import LLMTutor
+from models.tutor.projector import StrategyProjector
 
 
 class LossConfig(pydantic.BaseModel):
@@ -147,9 +150,9 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     # Optimizers and lr
     if config.arch.puzzle_emb_ndim == 0:
         optimizers = [
-            AdamATan2(
+            AdamAtan2(
                 model.parameters(),
-                lr=0,  # Needs to be set by scheduler
+                lr=0.0001,  # Needs to be set by scheduler
                 weight_decay=config.weight_decay,
                 betas=(config.beta1, config.beta2)
             )
@@ -161,7 +164,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         optimizers = [
             CastedSparseEmbeddingSignSGD_Distributed(
                 model.model.puzzle_emb.buffers(),  # type: ignore
-                lr=0,  # Needs to be set by scheduler
+                lr=0.0001,  # Needs to be set by scheduler
                 weight_decay=config.puzzle_emb_weight_decay,
                 world_size=world_size
             )
@@ -173,13 +176,13 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         optimizers = [
             CastedSparseEmbeddingSignSGD_Distributed(
                 model.model.puzzle_emb.buffers(),  # type: ignore
-                lr=0,  # Needs to be set by scheduler
+                lr=0.0001,  # Needs to be set by scheduler
                 weight_decay=config.puzzle_emb_weight_decay,
                 world_size=world_size
             ),
-            AdamATan2(
+            AdamAtan2(
                 model.parameters(),
-                lr=0,  # Needs to be set by scheduler
+                lr=0.0001,  # Needs to be set by scheduler
                 weight_decay=config.weight_decay,
                 betas=(config.beta1, config.beta2)
             )
@@ -286,13 +289,23 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
 
     return evaluators
 
-def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
+def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int, tutor=None, projector=None):
     train_state.step += 1
     if train_state.step > train_state.total_steps:  # At most train_total_steps
         return
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
+
+    # --- HOT START INJECTION ---
+    # In a real setup, you'd pass the tutor/projector in, but for the smoke test we can access them globally or assume they are passed
+    # Assuming we passed them into train_batch as kwargs for cleanliness:
+    if tutor is not None and projector is not None:
+        # Extract intuition and project it
+        llm_latent = tutor.get_strategy_embedding(batch["inputs"])
+        strategy_vec = projector(llm_latent)
+        batch["external_strategy_emb"] = strategy_vec
+    # ---------------------------
 
     # Init carry if it is None
     if train_state.carry is None:
@@ -534,6 +547,27 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
 
 @hydra.main(config_path="config", config_name="cfg_pretrain", version_base=None)
 def launch(hydra_config: DictConfig):
+
+# SMOKE TEST OVERRIDES - smoke test to verify implementation works
+    IS_SMOKE_TEST = True
+    if IS_SMOKE_TEST:
+        from omegaconf import OmegaConf
+        print("\n!!! WARNING: RUNNING 10-10-2 SMOKE TEST !!!\n")
+        
+        # Unfreeze the config to allow modifications
+        OmegaConf.set_struct(hydra_config, False)
+        
+        hydra_config.epochs = 2
+        hydra_config.eval_interval = 2
+        hydra_config.global_batch_size = 512
+        hydra_config.arch.halt_max_steps = 2 
+
+        hydra_config.data_paths = ["data/sudoku-extreme-1k-aug-1000"]
+        
+        # Re-freeze for safety
+        OmegaConf.set_struct(hydra_config, True)
+    # END SMOKE TEST
+
     RANK = 0
     WORLD_SIZE = 1
     CPU_PROCESS_GROUP = None
@@ -595,6 +629,26 @@ def launch(hydra_config: DictConfig):
         ema_helper = EMAHelper(mu=config.ema_rate)
         ema_helper.register(train_state.model)
 
+
+    tutor = None
+    projector = None
+    if RANK == 0: 
+        tutor = LLMTutor()
+        
+        # Get TRM dimension dynamically or default to 512
+        trm_dim = config.arch.__pydantic_extra__.get("hidden_size", 512)
+        projector = StrategyProjector(llm_dim=4096, trm_dim=trm_dim).cuda().to(torch.bfloat16)
+        
+        # SAFER OPTIMIZER LOGIC: Give the projector its own AdamW optimizer
+        import torch.optim as optim
+        proj_optimizer = optim.AdamW(projector.parameters(), lr=1e-4)
+        
+        # Because train_state.optimizers is a list, we can just append it!
+        # The existing training loop will automatically iterate over this and call step()
+        train_state.optimizers.append(proj_optimizer)
+        train_state.optimizer_lrs.append(1e-4)
+
+
     # Training Loop
     for _iter_id in range(total_iters):
         print (f"[Rank {RANK}, World Size {WORLD_SIZE}]: Epoch {_iter_id * train_epochs_per_iter}")
@@ -604,7 +658,7 @@ def launch(hydra_config: DictConfig):
             print("TRAIN")
         train_state.model.train()
         for set_name, batch, global_batch_size in train_loader:
-            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE)
+            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE, tutor=tutor, projector=projector)
 
             if RANK == 0 and metrics is not None:
                 wandb.log(metrics, step=train_state.step)

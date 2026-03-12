@@ -159,12 +159,43 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             self.q_head.weight.zero_()
             self.q_head.bias.fill_(-5)  # type: ignore
 
-    def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
+
+
+
+    # def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor):
+    #     # Token embedding
+    #     embedding = self.embed_tokens(input.to(torch.int32))
+
+    #     # Puzzle embeddings
+    #     if self.config.puzzle_emb_ndim > 0:
+    #         puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
+            
+    #         pad_count = self.puzzle_emb_len * self.config.hidden_size - puzzle_embedding.shape[-1]
+    #         if pad_count > 0:
+    #             puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
+
+    #         embedding = torch.cat((puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), dim=-2)
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~edited, previous input embedding definition above~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    def _input_embeddings(self, input: torch.Tensor, puzzle_identifiers: torch.Tensor, external_strategy_emb: Optional[torch.Tensor] = None):
         # Token embedding
         embedding = self.embed_tokens(input.to(torch.int32))
 
         # Puzzle embeddings
-        if self.config.puzzle_emb_ndim > 0:
+        if external_strategy_emb is not None:
+            # HOT START OVERRIDE: Use the LLM's intuition
+            puzzle_embedding = external_strategy_emb.to(self.forward_dtype)
+            
+            pad_count = self.puzzle_emb_len * self.config.hidden_size - puzzle_embedding.shape[-1]
+            if pad_count > 0:
+                puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
+
+            embedding = torch.cat((puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), dim=-2)
+            
+        elif self.config.puzzle_emb_ndim > 0:
+            # ORIGINAL LOGIC: Use the memorized lookup table
             puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
             
             pad_count = self.puzzle_emb_len * self.config.hidden_size - puzzle_embedding.shape[-1]
@@ -172,7 +203,6 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                 puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
 
             embedding = torch.cat((puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size), embedding), dim=-2)
-
         # Position embeddings
         if self.config.pos_encodings == "learned":
             # scale by 1/sqrt(2) to maintain forward variance
@@ -180,6 +210,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
 
         # Scale
         return self.embed_scale * embedding
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~edited~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 
     def empty_carry(self, batch_size: int):
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
@@ -199,7 +233,14 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         )
 
         # Input encoding
-        input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        
+# ~~~~~~~~~~~~~~~~~~ CHANGED ~~~~~~~~~~~~~~~ #        
+        
+        #input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
+        ext_emb = batch.get("external_strategy_emb", None)
+        input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"], ext_emb)
+
+# ~~~~~~~~~~~~~~~~~~ CHANGED ~~~~~~~~~~~~~ #
 
         # Forward iterations
         it = 0
@@ -253,7 +294,8 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
         
         new_steps = torch.where(carry.halted, 0, carry.steps)
 
-        new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
+        #new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
+        new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v.detach() if v.requires_grad else v) for k, v in carry.current_data.items()}
 
         # Forward inner model
         new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
