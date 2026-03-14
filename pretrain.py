@@ -289,7 +289,8 @@ def create_evaluators(config: PretrainConfig, eval_metadata: PuzzleDatasetMetada
 
     return evaluators
 
-def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int, tutor=None, projector=None):
+#def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int, tutor=None, projector=None):
+def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int, projector=None):
     train_state.step += 1
     if train_state.step > train_state.total_steps:  # At most train_total_steps
         return
@@ -298,19 +299,34 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     batch = {k: v.cuda() for k, v in batch.items()}
 
     # --- HOT START INJECTION ---
-    # In a real setup, you'd pass the tutor/projector in, but for the smoke test we can access them globally or assume they are passed
+    # In a real setup, pass the tutor/projector in, but for the smoke test we can access them globally or assume they are passed
     # Assuming we passed them into train_batch as kwargs for cleanliness:
-    if tutor is not None and projector is not None:
-        # Extract intuition and project it
-        llm_latent = tutor.get_strategy_embedding(batch["inputs"])
+
+    # PRECOMPUTATION 
+    # if tutor is not None and projector is not None:
+    #     # Extract intuition and project it
+    #     llm_latent = tutor.get_strategy_embedding(batch["inputs"])
+    #     strategy_vec = projector(llm_latent)
+    #     batch["external_strategy_emb"] = strategy_vec
+
+
+    # ---------------------------
+    if projector is not None and "latents" in batch:
+        llm_latent = batch["latents"].to(torch.bfloat16)
         strategy_vec = projector(llm_latent)
         batch["external_strategy_emb"] = strategy_vec
-    # ---------------------------
 
     # Init carry if it is None
     if train_state.carry is None:
         with torch.device("cuda"):
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
+    else:
+        # --- NEW CLEAN GRAPH SEVERING ---
+        # Detach the carried strategy vectors so PyTorch doesn't try to backprop 
+        # into the previous batch's destroyed computation graph.
+        for k, v in train_state.carry.current_data.items():
+            if v.requires_grad:
+                train_state.carry.current_data[k] = v.detach()
 
     # Forward
     train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
@@ -549,7 +565,7 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
 def launch(hydra_config: DictConfig):
 
 # SMOKE TEST OVERRIDES - smoke test to verify implementation works
-    IS_SMOKE_TEST = True
+    IS_SMOKE_TEST = False
     if IS_SMOKE_TEST:
         from omegaconf import OmegaConf
         print("\n!!! WARNING: RUNNING 10-10-2 SMOKE TEST !!!\n")
@@ -629,11 +645,11 @@ def launch(hydra_config: DictConfig):
         ema_helper = EMAHelper(mu=config.ema_rate)
         ema_helper.register(train_state.model)
 
-
-    tutor = None
+    # NOTE: for precomputation, uncomment tutor and LLMTutor() lines
+    # tutor = None
     projector = None
     if RANK == 0: 
-        tutor = LLMTutor()
+        # tutor = LLMTutor()
         
         # Get TRM dimension dynamically or default to 512
         trm_dim = config.arch.__pydantic_extra__.get("hidden_size", 512)
@@ -658,7 +674,7 @@ def launch(hydra_config: DictConfig):
             print("TRAIN")
         train_state.model.train()
         for set_name, batch, global_batch_size in train_loader:
-            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE, tutor=tutor, projector=projector)
+            metrics = train_batch(config, train_state, batch, global_batch_size, rank=RANK, world_size=WORLD_SIZE, projector=projector) # tutor=tutor, projector=projector)
 
             if RANK == 0 and metrics is not None:
                 wandb.log(metrics, step=train_state.step)
