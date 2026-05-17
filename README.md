@@ -9,7 +9,7 @@ The Tiny Recursive Model (TRM) is a recursive reasoning model that achieved amaz
 ### Architecture
 
 <p align="center">
-  <img src="[https://github.com/RylanPow/TinyRecursiveModels/assets/trm vs hot start.png](https://github.com/RylanPow/TinyRecursiveModels/blob/main/assets/trm%20vs%20hot%20start.png)" style="width: 30%;">
+  <img src="https://github.com/RylanPow/TinyRecursiveModels/blob/main/assets/trm%20vs%20hot%20start.png" style="width: 30%;">
 </p>
 
 
