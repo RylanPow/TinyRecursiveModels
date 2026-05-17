@@ -11,6 +11,7 @@ Our modified model's architecture consists of 3 critical components: the origina
 <p align="center">
   <img src="https://github.com/RylanPow/TinyRecursiveModels/blob/main/assets/trm%20vs%20hot%20start.png" style="width: 100%;">
 </p>
+In the above figure, the left model is the original TRM, and the right model is the TRM with our Hot-Starting mechanism.
 
 
 ### Requirements
