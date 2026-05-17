@@ -1,6 +1,10 @@
 # Tiny Recursive Models (TRMs) Adapted for Transfer Learning
-
 This is the repo for the paper Tiny Recursive Models (TRMs) Addapted for Transfer Learning.  We introduce the Semantic Hot-Starting mechansim to replace the TRM's dependency on puzzle_id embeddings.  
+
+<p align="center">
+  <img src="https://github.com/RylanPow/TinyRecursiveModels/blob/main/assets/trm%20vs%20hot%20start.png" style="width: 100%;">
+</p>
+In the above figure, the left model is the original TRM, and the right model is the TRM with our Hot-Starting mechanism.
 
 ### Motivation
 
@@ -8,10 +12,6 @@ The Tiny Recursive Model (TRM) is a recursive reasoning model that achieved amaz
 
 ### Architecture
 Our modified model's architecture consists of 3 critical components: the original TRM core, a frozen LLM tutor, and a "strategy projector".  The frozen LLM tutor, Qwen3-8B in our experiments, is fed an embedding of the puzzle.  We take the 30th hidden layer (deep enough to contain rich task-related reasoning whilst early enough to avoid information focused on linguistic token generation) and use that as the "intuition vector".  The intuition vector is of 4096 dimension, while the TRM takes in puzzle_id of dimension 512.  TO bridge this gap, the strategy projector, implemented as a 3-layer MLP NN, translates the intuition vector into the appropriate dimensions for the TRM ot understand.  This intuition vector fed through the strategy projector entirely replaces the puzzle_id, allowing us to circumvent the retrieval dependency of the original TRM. 
-<p align="center">
-  <img src="https://github.com/RylanPow/TinyRecursiveModels/blob/main/assets/trm%20vs%20hot%20start.png" style="width: 100%;">
-</p>
-In the above figure, the left model is the original TRM, and the right model is the TRM with our Hot-Starting mechanism.
 
 
 ### Requirements
