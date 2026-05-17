@@ -1,6 +1,6 @@
-# Less is More: Recursive Reasoning with Tiny Networks
+# Tiny Recursive Models (TRMs) Adapted for Transfer Learning
 
-This is the codebase for the paper: "Less is More: Recursive Reasoning with Tiny Networks". TRM is a recursive reasoning approach that achieves amazing scores of 45% on ARC-AGI-1 and 8% on ARC-AGI-2 using a tiny 7M parameters neural network.
+This is the repo for the paper Tiny Recursive Models (TRMs) Addapted for Transfer Learning.  We introduce the Semantic Hot-Starting mechansim to replace the TRM's dependency on puzzle_id embeddings.  
 
 [Paper](https://arxiv.org/abs/2510.04871)
 
